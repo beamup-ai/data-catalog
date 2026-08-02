@@ -21,7 +21,7 @@ from aws_reference_agent.tools.context import (
     get_context,
     get_expected_concepts,
     get_verify_mode,
-    is_web_pass,
+    is_augmenting_pass,
 )
 from aws_reference_agent.verification import VerifyMode
 
@@ -189,9 +189,34 @@ def write_concept_doc(
             "error": (
                 f"Refusing to write: the body links to "
                 f"{len(dead_links)} target(s) that will never exist in this "
-                f"bundle: {shown}{truncated}. Either drop the link(s) or "
-                f"rewrite the prose without them; only link to concepts "
-                f"that are part of this run or documents already on disk."
+                f"bundle: {shown}{truncated}. This is final — the target is "
+                f"out of this run's scope, so re-checking list_concepts will "
+                f"not change it (an entry there with `in_scope: false` is "
+                f"listed for recognition only, not as a link target). Drop the "
+                f"link(s) or rewrite the prose to name the concept as plain "
+                f"text; only link to in-scope concepts or documents already on "
+                f"disk."
+            ),
+            "concept_id": concept_id,
+        }
+
+    # Mint guard: an augmenting pass may only create documents under
+    # `references/`. Anything else it creates is a concept the source pass never
+    # advertised, so its schema and `resource` are the model's invention rather
+    # than catalog metadata — and the schema guard below cannot catch that,
+    # because there is no existing doc to compare against. Keyed on the
+    # destination rather than the declared `type` so relabelling cannot bypass
+    # it.
+    if is_augmenting_pass() and not path.exists() and cid[0] != "references":
+        return {
+            "error": (
+                f"Refusing to write: this pass augments concepts the source "
+                f"pass already produced, and no document exists yet at "
+                f"{concept_id}. An ingestion pass may only create new "
+                f"documents under `references/`. If the document you ingested "
+                f"describes a concept the catalog does not have, do not mint "
+                f"it: either record what it says in a `references/<slug>` doc, "
+                f"or note the discrepancy in the prose of an existing concept."
             ),
             "concept_id": concept_id,
         }
@@ -225,11 +250,11 @@ def write_concept_doc(
                     "concept_id": concept_id,
                 }
 
-    # Augmentation guard: during the web pass, refuse writes that shrink
+    # Augmentation guard: during any ingestion pass, refuse writes that shrink
     # an existing source table doc's # Schema field set or its `sources`
     # frontmatter list. The source pass populates these from real metadata;
-    # the web pass must augment, not replace.
-    if is_web_pass() and path.exists():
+    # later passes must augment, not replace.
+    if is_augmenting_pass() and path.exists():
         try:
             existing = OKFDocument.parse(path.read_text(encoding="utf-8"))
         except Exception:

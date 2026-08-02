@@ -8,8 +8,10 @@ import pytest
 from aws_reference_agent.bundle.document import OKFDocument
 from aws_reference_agent.tools.bundle_tools import write_concept_doc
 from aws_reference_agent.tools.context import (
+    clear_docs_state,
     clear_web_state,
     set_context,
+    set_docs_state,
     set_expected_concepts,
     set_web_state,
 )
@@ -20,11 +22,18 @@ from aws_reference_agent.verification import VerifyMode
 def _cleanup():
     yield
     clear_web_state()
+    clear_docs_state()
 
 
 def _set_ctx(tmp_path: Path, verify_queries: str = VerifyMode.SCHEMA) -> None:
     src = MagicMock()
     set_context(src, tmp_path, model="sonnet", verify_queries=verify_queries)
+
+
+def _enter_docs_pass(tmp_path: Path) -> None:
+    docs_root = tmp_path / "_docs_root"
+    docs_root.mkdir(exist_ok=True)
+    set_docs_state(docs_root, max_files=1)
 
 
 def _good_frontmatter(**overrides):
@@ -52,12 +61,12 @@ def test_write_succeeds_when_no_existing_doc(tmp_path):
     _set_ctx(tmp_path)
     set_web_state(allowed_hosts=set(), max_pages=1)
     result = write_concept_doc(
-        "tables/users",
-        _good_frontmatter(sources=_sources("bq")),
+        "references/users_guide",
+        _good_frontmatter(type="Reference", sources=_sources("web")),
         _bq_body(["id", "name"]),
     )
     assert "error" not in result
-    assert (tmp_path / "tables" / "users.md").exists()
+    assert (tmp_path / "references" / "users_guide.md").exists()
 
 
 def test_generated_is_auto_filled(tmp_path):
@@ -145,6 +154,144 @@ def test_web_pass_allows_augmentation_with_new_section(tmp_path):
         _good_frontmatter(sources=_sources("bq", "web")),
         augmented,
     )
+    assert "error" not in result
+
+
+def test_docs_pass_rejects_schema_shrinkage(tmp_path):
+    _set_ctx(tmp_path)
+    write_concept_doc(
+        "tables/users",
+        _good_frontmatter(),
+        _bq_body(["id", "name", "email", "created_at"]),
+    )
+    _enter_docs_pass(tmp_path)
+    result = write_concept_doc(
+        "tables/users",
+        _good_frontmatter(),
+        _bq_body(["id", "name"]),
+    )
+    assert "error" in result
+    # The error must name the missing fields so the prompt's retry rule has
+    # something concrete to act on.
+    assert "missing 2" in result["error"]
+    assert "`email`" in result["error"]
+    assert "`created_at`" in result["error"]
+
+
+def test_docs_pass_rejects_sources_shrinkage(tmp_path):
+    _set_ctx(tmp_path)
+    write_concept_doc(
+        "tables/users",
+        _good_frontmatter(sources=_sources("glue", "other")),
+        _bq_body(["id"]),
+    )
+    _enter_docs_pass(tmp_path)
+    result = write_concept_doc(
+        "tables/users",
+        _good_frontmatter(sources=_sources("local_doc")),
+        _bq_body(["id"]),
+    )
+    assert "error" in result
+    assert "had 2 entr" in result["error"]
+
+
+def test_docs_pass_allows_metrics_section_with_schema_and_sources_preserved(tmp_path):
+    """The augmentation path the metrics extraction depends on must work."""
+    _set_ctx(tmp_path)
+    write_concept_doc(
+        "tables/users",
+        _good_frontmatter(sources=_sources("glue")),
+        _bq_body(["id", "name"]),
+    )
+    _enter_docs_pass(tmp_path)
+    augmented = (
+        "Prose.\n\n# Schema\n- `id` STRING: desc\n- `name` STRING: desc\n\n"
+        "# Metrics\n- [DAU](/references/metrics/dau.md) — count distinct id\n"
+    )
+    result = write_concept_doc(
+        "tables/users",
+        _good_frontmatter(sources=_sources("glue", "local_doc")),
+        augmented,
+    )
+    assert "error" not in result
+
+
+def test_docs_pass_refuses_to_mint_a_source_table_doc(tmp_path):
+    """A table the source pass never wrote must not appear from a document.
+
+    Minting one fabricates both the schema and the `resource` ARN, and the
+    schema guard cannot catch it because there is no existing doc to compare
+    against.
+    """
+    _set_ctx(tmp_path)
+    _enter_docs_pass(tmp_path)
+    result = write_concept_doc(
+        "tables/never_in_the_catalog",
+        _good_frontmatter(),
+        _bq_body(["id", "name"]),
+    )
+    assert "error" in result
+    assert "tables/never_in_the_catalog" in result["error"]
+    assert "references/" in result["error"]
+    assert not (tmp_path / "tables" / "never_in_the_catalog.md").exists()
+
+
+def test_web_pass_refuses_to_mint_a_source_table_doc(tmp_path):
+    _set_ctx(tmp_path)
+    set_web_state(allowed_hosts=set(), max_pages=1)
+    result = write_concept_doc(
+        "tables/never_in_the_catalog", _good_frontmatter(), _bq_body(["id"])
+    )
+    assert "error" in result
+
+
+def test_augmenting_pass_refuses_a_new_non_reference_doc_of_any_type(tmp_path):
+    """The restriction is on the destination, not on the declared `type`.
+
+    Relabelling a fabricated table as a Reference must not buy it a slot in
+    `tables/`.
+    """
+    _set_ctx(tmp_path)
+    _enter_docs_pass(tmp_path)
+    result = write_concept_doc(
+        "tables/sneaky",
+        _good_frontmatter(type="Reference", title="Sneaky"),
+        "Prose.\n",
+    )
+    assert "error" in result
+
+
+def test_augmenting_pass_may_mint_reference_docs(tmp_path):
+    _set_ctx(tmp_path)
+    _enter_docs_pass(tmp_path)
+    for cid in (
+        "references/location_codes",
+        "references/metrics/dau",
+        "references/joins/lots__skus",
+    ):
+        result = write_concept_doc(
+            cid,
+            _good_frontmatter(type="Reference", title=cid, resource="raw/dict.md"),
+            "Prose.\n",
+        )
+        assert "error" not in result, cid
+
+
+def test_augmenting_pass_may_still_augment_an_existing_table_doc(tmp_path):
+    _set_ctx(tmp_path)
+    write_concept_doc("tables/users", _good_frontmatter(), _bq_body(["id"]))
+    _enter_docs_pass(tmp_path)
+    result = write_concept_doc(
+        "tables/users",
+        _good_frontmatter(),
+        "Prose.\n\n# Schema\n- `id` STRING: better desc\n",
+    )
+    assert "error" not in result
+
+
+def test_source_pass_may_still_create_new_table_docs(tmp_path):
+    _set_ctx(tmp_path)
+    result = write_concept_doc("tables/users", _good_frontmatter(), _bq_body(["id"]))
     assert "error" not in result
 
 

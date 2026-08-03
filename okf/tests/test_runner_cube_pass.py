@@ -140,9 +140,9 @@ def test_cube_pass_runs_after_git_and_before_docs(tmp_path, monkeypatch):
         r = _runner(
             tmp_path,
             web_seeds=["https://example.com/docs"],
-            git_repo=str(repo),
+            git_repos=[str(repo)],
             cube_url="http://cube.test",
-            docs_root=docs,
+            docs_roots=[docs],
         )
         r.enrich_all()
 

@@ -59,8 +59,8 @@ def test_git_flags_are_threaded_into_the_runner(tmp_path, capsys):
     ) == 0
 
     kwargs = _FakeRunner.last_kwargs
-    assert kwargs["git_repo"] == "git@example.com:acme/warehouse.git"
-    assert kwargs["git_ref"] == "release"
+    assert kwargs["git_repos"] == ["git@example.com:acme/warehouse.git"]
+    assert kwargs["git_refs"] == ["release"]
     assert kwargs["git_max_files"] == 7
     assert kwargs["git_max_bytes"] == 1024
     assert kwargs["git_max_searches"] == 9
@@ -75,13 +75,13 @@ def test_no_git_suppresses_the_pass(tmp_path, capsys):
         _argv(tmp_path, "--git-repo", "https://example.com/a.git", "--no-git")
     ) == 0
 
-    assert _FakeRunner.last_kwargs["git_repo"] is None
+    assert _FakeRunner.last_kwargs["git_repos"] == []
     assert "git pass skipped" in capsys.readouterr().err
 
 
 def test_git_pass_skipped_when_no_repo_given(tmp_path, capsys):
     assert cli_mod.main(_argv(tmp_path)) == 0
-    assert _FakeRunner.last_kwargs["git_repo"] is None
+    assert _FakeRunner.last_kwargs["git_repos"] == []
     assert "git pass skipped" in capsys.readouterr().err
 
 
@@ -92,5 +92,37 @@ def test_a_url_git_repo_is_accepted_without_a_directory_precheck(tmp_path):
         _argv(tmp_path, "--git-repo", "git@example.com:acme/warehouse.git")
     ) == 0
     assert (
-        _FakeRunner.last_kwargs["git_repo"] == "git@example.com:acme/warehouse.git"
+        _FakeRunner.last_kwargs["git_repos"] == ["git@example.com:acme/warehouse.git"]
     )
+
+
+def test_multiple_git_repos_with_position_aligned_refs(tmp_path, capsys):
+    assert cli_mod.main(
+        _argv(
+            tmp_path,
+            "--git-repo", "git@example.com:acme/a.git",
+            "--git-repo", "git@example.com:acme/b.git",
+            "--git-ref", "main",
+            "--git-ref", "develop",
+        )
+    ) == 0
+
+    kwargs = _FakeRunner.last_kwargs
+    assert kwargs["git_repos"] == [
+        "git@example.com:acme/a.git",
+        "git@example.com:acme/b.git",
+    ]
+    assert kwargs["git_refs"] == ["main", "develop"]
+
+
+def test_git_ref_count_mismatch_exits(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(
+            _argv(
+                tmp_path,
+                "--git-repo", "git@example.com:acme/a.git",
+                "--git-repo", "git@example.com:acme/b.git",
+                "--git-ref", "main",
+            )
+        )
+    assert "--git-ref" in str(exc.value)

@@ -299,13 +299,13 @@ class ReferenceRunner:
         web_allowed_path_prefixes: list[str] | None = None,
         web_denied_path_substrings: list[str] | None = None,
         web_max_depth: int = 2,
-        docs_root: Path | None = None,
+        docs_roots: list[Path] | None = None,
         docs_include: list[str] | None = None,
         docs_exclude: list[str] | None = None,
         docs_max_files: int = 200,
         docs_max_bytes: int = 40 * 1024,
-        git_repo: str | None = None,
-        git_ref: str | None = None,
+        git_repos: list[str] | None = None,
+        git_refs: list[str] | None = None,
         git_max_files: int = 100,
         # Larger than the docs cap (40 KiB): source modules run long.
         git_max_bytes: int = 60 * 1024,
@@ -338,16 +338,21 @@ class ReferenceRunner:
                 urlparse(s).netloc for s in self.web_seeds if urlparse(s).netloc
             }
 
-        self.docs_root = Path(docs_root) if docs_root else None
         self.docs_include = list(docs_include or [])
         self.docs_exclude = list(docs_exclude or [])
         self.docs_max_files = int(docs_max_files)
         self.docs_max_bytes = int(docs_max_bytes)
+        self._docs_roots = [Path(d) for d in (docs_roots or [])]
 
-        # Not coerced to Path: the value is legitimately either a local path or
+        # Not coerced to Path: each value is legitimately either a local path or
         # a remote URL, and `open_checkout` is what decides which.
-        self.git_repo = git_repo or None
-        self.git_ref = git_ref or None
+        repos = list(git_repos or [])
+        refs = list(git_refs or [])
+        # CLI validates equal length; zip defensively in case the runner is
+        # constructed directly with mismatched lists.
+        self._git_targets: list[tuple[str, str | None]] = [
+            (repos[i], refs[i] if i < len(refs) else None) for i in range(len(repos))
+        ]
         self.git_max_files = int(git_max_files)
         self.git_max_bytes = int(git_max_bytes)
         self.git_max_searches = int(git_max_searches)
@@ -379,10 +384,10 @@ class ReferenceRunner:
             build_web_options(model=model) if self.web_seeds else None
         )
         self._docs_options = (
-            build_docs_options(model=model) if self.docs_root else None
+            build_docs_options(model=model) if self._docs_roots else None
         )
         self._git_options = (
-            build_git_options(model=model) if self.git_repo else None
+            build_git_options(model=model) if self._git_targets else None
         )
         self._cube_options = (
             build_cube_options(model=model) if self.cube_url else None
@@ -449,48 +454,47 @@ class ReferenceRunner:
         asyncio.run(self._run_web_pass_async())
 
     async def _run_git_pass_async(self) -> None:
-        if not self._git_options or not self.git_repo:
+        if not self._git_options or not self._git_targets:
             return
-        # The checkout is opened here rather than inside `set_git_state` so the
-        # resolved SHA is logged before the model runs, and so the clone's
-        # lifetime stays with the code that created it.
-        checkout = await asyncio.to_thread(
-            open_checkout, self.git_repo, ref=self.git_ref
-        )
-        try:
-            log.info(
-                "Running git pass: origin=%s, sha=%s, cloned=%s, root=%s, "
-                "max_searches=%d, max_hits=%d, max_files=%d, max_bytes=%d",
-                checkout.origin,
-                checkout.sha,
-                checkout.cloned,
-                checkout.root,
-                self.git_max_searches,
-                self.git_max_hits,
-                self.git_max_files,
-                self.git_max_bytes,
-            )
-            set_git_state(
-                checkout,
-                max_files=self.git_max_files,
-                max_bytes=self.git_max_bytes,
-                max_searches=self.git_max_searches,
-                max_hits=self.git_max_hits,
-            )
-            message = _build_git_user_message(
-                checkout.origin,
-                checkout.sha,
-                self.git_max_files,
-                self.git_max_bytes,
-                max_searches=self.git_max_searches,
-                max_hits=self.git_max_hits,
-                ref=self.git_ref,
-            )
-            await self._drain(message, self._git_options, "git")
-        finally:
-            clear_git_state()
-            # A temp clone must be removed even when the pass raises.
-            cleanup(checkout)
+        for repo, ref in self._git_targets:
+            # The checkout is opened here rather than inside `set_git_state` so
+            # the resolved SHA is logged before the model runs, and so the
+            # clone's lifetime stays with the code that created it.
+            checkout = await asyncio.to_thread(open_checkout, repo, ref=ref)
+            try:
+                log.info(
+                    "Running git pass: origin=%s, sha=%s, cloned=%s, root=%s, "
+                    "max_searches=%d, max_hits=%d, max_files=%d, max_bytes=%d",
+                    checkout.origin,
+                    checkout.sha,
+                    checkout.cloned,
+                    checkout.root,
+                    self.git_max_searches,
+                    self.git_max_hits,
+                    self.git_max_files,
+                    self.git_max_bytes,
+                )
+                set_git_state(
+                    checkout,
+                    max_files=self.git_max_files,
+                    max_bytes=self.git_max_bytes,
+                    max_searches=self.git_max_searches,
+                    max_hits=self.git_max_hits,
+                )
+                message = _build_git_user_message(
+                    checkout.origin,
+                    checkout.sha,
+                    self.git_max_files,
+                    self.git_max_bytes,
+                    max_searches=self.git_max_searches,
+                    max_hits=self.git_max_hits,
+                    ref=ref,
+                )
+                await self._drain(message, self._git_options, "git")
+            finally:
+                clear_git_state()
+                # A temp clone must be removed even when the pass raises.
+                cleanup(checkout)
 
     def run_git_pass(self) -> None:
         asyncio.run(self._run_git_pass_async())
@@ -514,41 +518,42 @@ class ReferenceRunner:
         asyncio.run(self._run_cube_pass_async())
 
     async def _run_docs_pass_async(self) -> None:
-        if not self._docs_options or not self.docs_root:
+        if not self._docs_options or not self._docs_roots:
             return
-        set_docs_state(
-            self.docs_root,
-            include=self.docs_include or None,
-            exclude=self.docs_exclude or None,
-            max_files=self.docs_max_files,
-            max_bytes=self.docs_max_bytes,
-        )
-        try:
-            state = get_docs_state()
-            # A truncated manifest must be visible: silently capping coverage
-            # reads as "we ingested everything" when we did not.
-            log.info(
-                "Running docs pass: root=%s, %d document(s) discovered "
-                "(%d dropped by max_files=%d), max_bytes=%d, include=%s, "
-                "exclude=%s",
-                state.root,
-                len(state.manifest),
-                state.truncated_count,
-                self.docs_max_files,
-                self.docs_max_bytes,
-                self.docs_include,
-                self.docs_exclude,
+        for root in self._docs_roots:
+            set_docs_state(
+                root,
+                include=self.docs_include or None,
+                exclude=self.docs_exclude or None,
+                max_files=self.docs_max_files,
+                max_bytes=self.docs_max_bytes,
             )
-            message = _build_docs_user_message(
-                state.root,
-                self.docs_max_files,
-                self.docs_max_bytes,
-                include=self.docs_include,
-                exclude=self.docs_exclude,
-            )
-            await self._drain(message, self._docs_options, "docs")
-        finally:
-            clear_docs_state()
+            try:
+                state = get_docs_state()
+                # A truncated manifest must be visible: silently capping
+                # coverage reads as "we ingested everything" when we did not.
+                log.info(
+                    "Running docs pass: root=%s, %d document(s) discovered "
+                    "(%d dropped by max_files=%d), max_bytes=%d, include=%s, "
+                    "exclude=%s",
+                    state.root,
+                    len(state.manifest),
+                    state.truncated_count,
+                    self.docs_max_files,
+                    self.docs_max_bytes,
+                    self.docs_include,
+                    self.docs_exclude,
+                )
+                message = _build_docs_user_message(
+                    state.root,
+                    self.docs_max_files,
+                    self.docs_max_bytes,
+                    include=self.docs_include,
+                    exclude=self.docs_exclude,
+                )
+                await self._drain(message, self._docs_options, "docs")
+            finally:
+                clear_docs_state()
 
     def run_docs_pass(self) -> None:
         asyncio.run(self._run_docs_pass_async())

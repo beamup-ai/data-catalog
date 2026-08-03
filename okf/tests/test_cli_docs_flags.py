@@ -59,7 +59,7 @@ def test_docs_flags_are_threaded_into_the_runner(tmp_path, capsys):
     ) == 0
 
     kwargs = _FakeRunner.last_kwargs
-    assert kwargs["docs_root"] == docs
+    assert kwargs["docs_roots"] == [docs]
     assert kwargs["docs_include"] == ["*.md"]
     assert kwargs["docs_exclude"] == ["CHANGELOG.md"]
     assert kwargs["docs_max_files"] == 7
@@ -75,13 +75,13 @@ def test_no_docs_suppresses_the_pass(tmp_path, capsys):
         _argv(tmp_path, "--docs-root", str(docs), "--no-docs")
     ) == 0
 
-    assert _FakeRunner.last_kwargs["docs_root"] is None
+    assert _FakeRunner.last_kwargs["docs_roots"] == []
     assert "docs pass skipped" in capsys.readouterr().err
 
 
 def test_docs_pass_skipped_when_no_root_given(tmp_path, capsys):
     assert cli_mod.main(_argv(tmp_path)) == 0
-    assert _FakeRunner.last_kwargs["docs_root"] is None
+    assert _FakeRunner.last_kwargs["docs_roots"] == []
     assert "docs pass skipped" in capsys.readouterr().err
 
 
@@ -97,3 +97,36 @@ def test_docs_root_that_is_a_file_exits_with_a_message(tmp_path):
     with pytest.raises(SystemExit) as e:
         cli_mod.main(_argv(tmp_path, "--docs-root", str(f)))
     assert "--docs-root" in str(e.value)
+
+
+def test_multiple_docs_roots(tmp_path, capsys):
+    docs_a = tmp_path / "docs_a"
+    docs_a.mkdir()
+    docs_b = tmp_path / "docs_b"
+    docs_b.mkdir()
+
+    assert cli_mod.main(
+        _argv(
+            tmp_path,
+            "--docs-root", str(docs_a),
+            "--docs-root", str(docs_b),
+        )
+    ) == 0
+
+    assert _FakeRunner.last_kwargs["docs_roots"] == [docs_a, docs_b]
+
+
+def test_nonexistent_root_among_several_exits(tmp_path):
+    docs_a = tmp_path / "docs_a"
+    docs_a.mkdir()
+    missing = tmp_path / "missing"
+
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(
+            _argv(
+                tmp_path,
+                "--docs-root", str(docs_a),
+                "--docs-root", str(missing),
+            )
+        )
+    assert str(missing) in str(exc.value)

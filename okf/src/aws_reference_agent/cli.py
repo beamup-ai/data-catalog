@@ -209,6 +209,51 @@ def _parser() -> argparse.ArgumentParser:
         help="Skip the docs pass entirely, even if --docs-root is given.",
     )
     enrich.add_argument(
+        "--git-repo",
+        default=None,
+        help="Git repository to ingest code from. Either a remote URL or an "
+        "existing local checkout. Enables the git pass. Remotes are "
+        "shallow-cloned with the local git binary, so private repositories work "
+        "through your existing SSH keys or credential helper; no token is "
+        "passed to this tool.",
+    )
+    enrich.add_argument(
+        "--git-ref",
+        default=None,
+        help="Branch or tag to clone (remote URLs only). A local checkout is "
+        "read at its current HEAD and never mutated.",
+    )
+    enrich.add_argument(
+        "--git-max-files",
+        type=int,
+        default=100,
+        help="Hard cap on repository files the git agent may read in one run "
+        "(default 100).",
+    )
+    enrich.add_argument(
+        "--git-max-bytes",
+        type=int,
+        default=60 * 1024,
+        help="Per-file byte cap; longer files are truncated (default 61440).",
+    )
+    enrich.add_argument(
+        "--git-max-searches",
+        type=int,
+        default=60,
+        help="Hard cap on git grep searches in one run (default 60).",
+    )
+    enrich.add_argument(
+        "--git-max-hits",
+        type=int,
+        default=50,
+        help="Max hits returned per search (default 50).",
+    )
+    enrich.add_argument(
+        "--no-git",
+        action="store_true",
+        help="Skip the git pass entirely, even if --git-repo is given.",
+    )
+    enrich.add_argument(
         "--verify-queries",
         choices=VERIFY_MODES,
         default="schema",
@@ -285,6 +330,9 @@ def main(argv: list[str] | None = None) -> int:
         docs_root = None if args.no_docs else args.docs_root
         if docs_root is not None and not docs_root.is_dir():
             raise SystemExit(f"--docs-root is not an existing directory: {docs_root}")
+        # No is_dir() precheck for --git-repo: the value is legitimately either a
+        # path or a URL, so validation belongs in open_checkout.
+        git_repo = None if args.no_git else args.git_repo
         runner = ReferenceRunner(
             source=source,
             bundle_root=args.out,
@@ -300,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
             docs_exclude=args.docs_exclude,
             docs_max_files=args.docs_max_files,
             docs_max_bytes=args.docs_max_bytes,
+            git_repo=git_repo,
+            git_ref=args.git_ref,
+            git_max_files=args.git_max_files,
+            git_max_bytes=args.git_max_bytes,
+            git_max_searches=args.git_max_searches,
+            git_max_hits=args.git_max_hits,
             verbose=args.verbose,
             verify_queries=args.verify_queries,
         )
@@ -313,8 +367,14 @@ def main(argv: list[str] | None = None) -> int:
             if docs_root
             else "; docs pass skipped"
         )
+        git_note = (
+            f"; git pass searched {git_repo}"
+            if git_repo
+            else "; git pass skipped"
+        )
         print(
-            f"Enriched {n} concept(s) into {args.out}{web_note}{docs_note}",
+            f"Enriched {n} concept(s) into {args.out}"
+            f"{web_note}{git_note}{docs_note}",
             file=sys.stderr,
         )
         return 0

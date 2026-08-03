@@ -17,8 +17,8 @@ def _cleanup():
     clear_docs_state()
 
 
-def _docs_root(tmp_path: Path) -> Path:
-    root = tmp_path / "docs"
+def _docs_root(tmp_path: Path, subdir: str = "docs") -> Path:
+    root = tmp_path / subdir
     root.mkdir()
     (root / "dictionary.md").write_text("# Users\n- `id`\n", encoding="utf-8")
     return root
@@ -54,7 +54,7 @@ def test_docs_pass_runs_with_docs_state_live(tmp_path, monkeypatch):
     calls: list[dict] = []
     _stub_query(monkeypatch, calls)
     root = _docs_root(tmp_path)
-    _runner(tmp_path, docs_root=root).run_docs_pass()
+    _runner(tmp_path, docs_roots=[root]).run_docs_pass()
 
     assert len(calls) == 1
     assert calls[0]["docs_pass"] is True
@@ -65,7 +65,7 @@ def test_docs_pass_runs_with_docs_state_live(tmp_path, monkeypatch):
 def test_docs_state_is_cleared_after_the_pass(tmp_path, monkeypatch):
     calls: list[dict] = []
     _stub_query(monkeypatch, calls)
-    _runner(tmp_path, docs_root=_docs_root(tmp_path)).run_docs_pass()
+    _runner(tmp_path, docs_roots=[_docs_root(tmp_path)]).run_docs_pass()
     assert is_docs_pass() is False
 
 
@@ -76,7 +76,7 @@ def test_docs_state_is_cleared_when_the_pass_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner_mod, "query", _boom)
     with pytest.raises(RuntimeError):
-        _runner(tmp_path, docs_root=_docs_root(tmp_path)).run_docs_pass()
+        _runner(tmp_path, docs_roots=[_docs_root(tmp_path)]).run_docs_pass()
     assert is_docs_pass() is False
 
 
@@ -107,7 +107,7 @@ def test_drain_closes_the_query_generator_when_the_loop_body_raises(
     monkeypatch.setattr(runner_mod, "query", _fake_query)
     monkeypatch.setattr(runner_mod, "_log_event_parts", _boom)
 
-    r = _runner(tmp_path, docs_root=_docs_root(tmp_path))
+    r = _runner(tmp_path, docs_roots=[_docs_root(tmp_path)])
 
     async def drain_and_report() -> list[bool]:
         with pytest.raises(RuntimeError, match="logging blew up"):
@@ -115,6 +115,22 @@ def test_drain_closes_the_query_generator_when_the_loop_body_raises(
         return list(closed)
 
     assert asyncio.run(drain_and_report()) == [True]
+
+
+def test_two_docs_roots_yield_two_passes(tmp_path, monkeypatch):
+    root_a = _docs_root(tmp_path, "docs_a")
+    root_b = _docs_root(tmp_path, "docs_b")
+
+    calls: list[dict] = []
+    _stub_query(monkeypatch, calls)
+
+    _runner(tmp_path, docs_roots=[root_a, root_b]).run_docs_pass()
+
+    assert len(calls) == 2
+    assert all(c["docs_pass"] is True for c in calls)
+    # Each root's path appears in exactly one prompt.
+    assert sum(str(root_a) in c["prompt"] for c in calls) == 1
+    assert sum(str(root_b) in c["prompt"] for c in calls) == 1
 
 
 def test_docs_pass_runs_after_the_web_pass_and_before_indexes(tmp_path, monkeypatch):
@@ -135,7 +151,7 @@ def test_docs_pass_runs_after_the_web_pass_and_before_indexes(tmp_path, monkeypa
     r = _runner(
         tmp_path,
         web_seeds=["https://example.com/docs"],
-        docs_root=_docs_root(tmp_path),
+        docs_roots=[_docs_root(tmp_path)],
     )
     r.enrich_all()
 

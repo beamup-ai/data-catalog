@@ -191,9 +191,10 @@ def _parser() -> argparse.ArgumentParser:
     enrich.add_argument(
         "--docs-root",
         type=Path,
+        action="append",
         default=None,
         help="Directory of local markdown/text documents to ingest. Enables "
-        "the docs pass. Needs no IAM and no network.",
+        "the docs pass. Needs no IAM and no network. Repeatable.",
     )
     enrich.add_argument(
         "--docs-include",
@@ -230,18 +231,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     enrich.add_argument(
         "--git-repo",
+        action="append",
         default=None,
         help="Git repository to ingest code from. Either a remote URL or an "
         "existing local checkout. Enables the git pass. Remotes are "
         "shallow-cloned with the local git binary, so private repositories work "
         "through your existing SSH keys or credential helper; no token is "
-        "passed to this tool.",
+        "passed to this tool. Repeatable.",
     )
     enrich.add_argument(
         "--git-ref",
+        action="append",
         default=None,
-        help="Branch or tag to clone (remote URLs only). A local checkout is "
-        "read at its current HEAD and never mutated.",
+        help="Branch or tag to clone for the remote at the same position in "
+        "--git-repo (remote URLs only; a local checkout is read at HEAD and "
+        "must have no ref). Repeatable; if given, the count must equal the "
+        "number of --git-repo values.",
     )
     enrich.add_argument(
         "--git-max-files",
@@ -366,12 +371,19 @@ def main(argv: list[str] | None = None) -> int:
             allowed_hosts = {urlparse(s).netloc for s in seeds if urlparse(s).netloc}
             if args.web_allowed_host:
                 allowed_hosts |= set(args.web_allowed_host)
-        docs_root = None if args.no_docs else args.docs_root
-        if docs_root is not None and not docs_root.is_dir():
-            raise SystemExit(f"--docs-root is not an existing directory: {docs_root}")
+        git_repos = [] if args.no_git else list(args.git_repo or [])
+        git_refs = list(args.git_ref or [])
+        if git_refs and len(git_refs) != len(git_repos):
+            raise SystemExit(
+                f"--git-ref must be given once per --git-repo (position-aligned), "
+                f"or not at all; got {len(git_refs)} ref(s) for {len(git_repos)} repo(s)"
+            )
+        docs_roots = [] if args.no_docs else list(args.docs_root or [])
+        for d in docs_roots:
+            if not d.is_dir():
+                raise SystemExit(f"--docs-root is not an existing directory: {d}")
         # No is_dir() precheck for --git-repo: the value is legitimately either a
         # path or a URL, so validation belongs in open_checkout.
-        git_repo = None if args.no_git else args.git_repo
         # Cube pass: enabled when --cube-url is set AND --source is not cube AND
         # --no-cube is not given. When --source cube is used the source pass
         # already consumed the Cube API; running a separate enrichment pass
@@ -392,13 +404,13 @@ def main(argv: list[str] | None = None) -> int:
             web_allowed_path_prefixes=args.web_allowed_path_prefix,
             web_denied_path_substrings=args.web_denied_path_substring,
             web_max_depth=args.web_max_depth,
-            docs_root=docs_root,
+            docs_roots=docs_roots,
             docs_include=args.docs_include,
             docs_exclude=args.docs_exclude,
             docs_max_files=args.docs_max_files,
             docs_max_bytes=args.docs_max_bytes,
-            git_repo=git_repo,
-            git_ref=args.git_ref,
+            git_repos=git_repos,
+            git_refs=git_refs,
             git_max_files=args.git_max_files,
             git_max_bytes=args.git_max_bytes,
             git_max_searches=args.git_max_searches,
@@ -416,13 +428,14 @@ def main(argv: list[str] | None = None) -> int:
         n = runner.enrich_all(only=only)
         web_note = f"; web pass used {len(seeds)} seed(s)" if seeds else "; web pass skipped"
         docs_note = (
-            f"; docs pass read up to {args.docs_max_files} file(s) from {docs_root}"
-            if docs_root
+            f"; docs pass read up to {args.docs_max_files} file(s) from "
+            f"{', '.join(str(d) for d in docs_roots)}"
+            if docs_roots
             else "; docs pass skipped"
         )
         git_note = (
-            f"; git pass searched {git_repo}"
-            if git_repo
+            f"; git pass searched {', '.join(git_repos)}"
+            if git_repos
             else "; git pass skipped"
         )
         cube_note = (

@@ -23,8 +23,8 @@ def _cleanup():
     clear_git_state()
 
 
-def _make_repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
+def _make_repo(tmp_path: Path, subdir: str = "repo") -> Path:
+    root = tmp_path / subdir
     root.mkdir()
     subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
     (root / "etl.sql").write_text("SELECT * FROM users\n", encoding="utf-8")
@@ -75,7 +75,7 @@ def test_git_pass_runs_with_git_state_live_and_sha_in_the_prompt(
     calls: list[dict] = []
     _stub_query(monkeypatch, calls)
     repo = _make_repo(tmp_path)
-    _runner(tmp_path, git_repo=str(repo)).run_git_pass()
+    _runner(tmp_path, git_repos=[str(repo)]).run_git_pass()
 
     assert len(calls) == 1
     assert calls[0]["git_pass"] is True
@@ -93,7 +93,7 @@ def test_git_pass_runs_with_git_state_live_and_sha_in_the_prompt(
 
 def test_git_state_is_cleared_after_the_pass(tmp_path, monkeypatch):
     _stub_query(monkeypatch, [])
-    _runner(tmp_path, git_repo=str(_make_repo(tmp_path))).run_git_pass()
+    _runner(tmp_path, git_repos=[str(_make_repo(tmp_path))]).run_git_pass()
     assert is_git_pass() is False
 
 
@@ -104,14 +104,14 @@ def test_git_state_is_cleared_when_the_pass_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner_mod, "query", _boom)
     with pytest.raises(RuntimeError):
-        _runner(tmp_path, git_repo=str(_make_repo(tmp_path))).run_git_pass()
+        _runner(tmp_path, git_repos=[str(_make_repo(tmp_path))]).run_git_pass()
     assert is_git_pass() is False
 
 
 def test_a_local_checkout_survives_the_pass(tmp_path, monkeypatch):
     _stub_query(monkeypatch, [])
     repo = _make_repo(tmp_path)
-    _runner(tmp_path, git_repo=str(repo)).run_git_pass()
+    _runner(tmp_path, git_repos=[str(repo)]).run_git_pass()
     # cleanup() must be a no-op for a tree we did not create.
     assert (repo / "etl.sql").exists()
 
@@ -129,10 +129,26 @@ def test_temp_clone_is_removed_when_the_pass_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner_mod, "query", _capture_then_boom)
     with pytest.raises(RuntimeError):
-        _runner(tmp_path, git_repo=repo.resolve().as_uri()).run_git_pass()
+        _runner(tmp_path, git_repos=[repo.resolve().as_uri()]).run_git_pass()
 
     assert len(roots) == 1
     assert not roots[0].exists()
+
+
+def test_two_repos_yield_two_passes(tmp_path, monkeypatch):
+    repo_a = _make_repo(tmp_path, "repo_a")
+    repo_b = _make_repo(tmp_path, "repo_b")
+
+    calls: list[dict] = []
+    _stub_query(monkeypatch, calls)
+
+    _runner(tmp_path, git_repos=[str(repo_a), str(repo_b)]).run_git_pass()
+
+    assert len(calls) == 2
+    assert all(c["git_pass"] is True for c in calls)
+    # Each repo's path appears in exactly one prompt.
+    assert sum(str(repo_a.resolve()) in c["prompt"] for c in calls) == 1
+    assert sum(str(repo_b.resolve()) in c["prompt"] for c in calls) == 1
 
 
 def test_git_pass_runs_after_the_web_pass_and_before_the_docs_pass(
@@ -164,8 +180,8 @@ def test_git_pass_runs_after_the_web_pass_and_before_the_docs_pass(
     r = _runner(
         tmp_path,
         web_seeds=["https://example.com/docs"],
-        git_repo=str(_make_repo(tmp_path)),
-        docs_root=docs,
+        git_repos=[str(_make_repo(tmp_path))],
+        docs_roots=[docs],
     )
     r.enrich_all()
 

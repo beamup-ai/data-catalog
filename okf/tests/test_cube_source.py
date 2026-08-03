@@ -192,3 +192,17 @@ def test_should_return_unsupported_string_from_validate_query():
     result = src.validate_query("SELECT 1")
     assert result is not None
     assert isinstance(result, str)
+
+
+def test_should_forward_timeout_to_client_when_no_client_injected():
+    from aws_reference_agent.sources.cube import CubeSource
+
+    src = CubeSource(base_url="http://cube.example.com", timeout=42.0)
+    assert src._client._timeout == 42.0
+
+
+def test_should_default_timeout_to_generous_value_for_cold_meta():
+    from aws_reference_agent.sources.cube import CubeSource
+
+    src = CubeSource(base_url="http://cube.example.com")
+    assert src._client._timeout == 60.0

@@ -15,7 +15,9 @@ class CubeError(Exception):
 
 
 class CubeClient:
-    def __init__(self, base_url: str, token: str | None = None, timeout: float = 10.0) -> None:
+    # Cold /meta on a large deployment can take ~40s while the server recompiles
+    # its schema, so the default is generous; warm requests return in <1s.
+    def __init__(self, base_url: str, token: str | None = None, timeout: float = 60.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._timeout = timeout
@@ -47,11 +49,12 @@ class CubeSource(Source):
         self,
         base_url: str,
         token: str | None = None,
+        timeout: float = 60.0,
         client=None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         if client is None:
-            client = CubeClient(base_url, token)
+            client = CubeClient(base_url, token, timeout=timeout)
         self._client = client
         self._meta_cache: dict[str, Any] | None = None
 

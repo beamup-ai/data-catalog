@@ -314,6 +314,7 @@ class ReferenceRunner:
         cube_url: str | None = None,
         cube_token: str | None = None,
         cube_max_reads: int = 100,
+        cube_timeout: float = 60.0,
         verbose: bool = False,
         verify_queries: str = VerifyMode.SCHEMA,
     ):
@@ -355,10 +356,13 @@ class ReferenceRunner:
         self.cube_url = cube_url or None
         self.cube_token = cube_token or None
         self.cube_max_reads = int(cube_max_reads)
+        self.cube_timeout = float(cube_timeout)
 
         if self.cube_url:
             self._cube_source: Any = CubeSource(
-                base_url=self.cube_url, token=self.cube_token
+                base_url=self.cube_url,
+                token=self.cube_token,
+                timeout=self.cube_timeout,
             )
         else:
             self._cube_source = None

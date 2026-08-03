@@ -36,7 +36,9 @@ def _build_source(name: str, args: argparse.Namespace):
         if not args.cube_url:
             raise SystemExit("--cube-url is required for --source cube")
         token = os.environ.get("CUBEJS_API_TOKEN")
-        return CubeSource(base_url=args.cube_url, token=token)
+        return CubeSource(
+            base_url=args.cube_url, token=token, timeout=args.cube_timeout
+        )
     raise SystemExit(f"Unknown source: {name}")
 
 
@@ -278,6 +280,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Hard cap on cubes the cube agent may read in one run (default 100).",
     )
     enrich.add_argument(
+        "--cube-timeout",
+        type=float,
+        default=60.0,
+        help="Per-request timeout in seconds for the Cube /meta call "
+        "(default 60). A cold semantic layer can take ~40s to recompile "
+        "its schema on the first request.",
+    )
+    enrich.add_argument(
         "--no-cube",
         action="store_true",
         help="Skip the Cube semantic layer pass entirely.",
@@ -396,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
             cube_url=cube_url_for_pass,
             cube_token=cube_token,
             cube_max_reads=args.cube_max_reads,
+            cube_timeout=args.cube_timeout,
             verbose=args.verbose,
             verify_queries=args.verify_queries,
         )

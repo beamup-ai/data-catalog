@@ -91,7 +91,10 @@ _list_repo_files = _wrap("list_repo_files", {"path_glob": str}, list_repo_files)
 _read_repo_file = _wrap("read_repo_file", {"path": str}, read_repo_file)
 
 
-def build_source_options(model: str = DEFAULT_MODEL) -> ClaudeAgentOptions:
+def build_source_options(
+    model: str = DEFAULT_MODEL,
+    instruction_file: str = "reference_instruction.md",
+) -> ClaudeAgentOptions:
     tools = [
         _list_concepts,
         _read_concept_raw,
@@ -113,7 +116,7 @@ def build_source_options(model: str = DEFAULT_MODEL) -> ClaudeAgentOptions:
         )
     ]
     return ClaudeAgentOptions(
-        system_prompt=_load_prompt("reference_instruction.md"),
+        system_prompt=_load_prompt(instruction_file),
         mcp_servers={_SERVER_NAME: server},
         allowed_tools=allowed,
         tools=[],

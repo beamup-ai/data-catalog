@@ -367,7 +367,14 @@ class ReferenceRunner:
         else:
             self._cube_source = None
 
-        self._source_options = build_source_options(model=model)
+        source_instruction = (
+            "cube_reference_instruction.md"
+            if getattr(self.source, "name", "") == "cube"
+            else "reference_instruction.md"
+        )
+        self._source_options = build_source_options(
+            model=model, instruction_file=source_instruction
+        )
         self._web_options = (
             build_web_options(model=model) if self.web_seeds else None
         )

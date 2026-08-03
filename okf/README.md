@@ -452,7 +452,9 @@ uv run aws-reference-agent enrich \
 
 Drop `--concept` to catalog every cube and view. Cube ids are `cubes/<name>`
 and `views/<name>`; each doc lists the cube's measures, dimensions, and
-segments. Note that `/meta` carries the semantic *interface* only — member
+segments, and its `# Common query patterns` show how to query the cube through
+Cube's API — REST `/load` query objects and, where useful, a Cube SQL API
+example — rather than raw warehouse SQL, since a cube is not a physical table. Note that `/meta` carries the semantic *interface* only — member
 titles, types, and descriptions — not the SQL, joins, or physical-table
 mapping; that construction logic lives in the cube-definition repository and is
 reached through the git pass below.

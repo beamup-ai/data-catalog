@@ -6,13 +6,16 @@ from unittest.mock import MagicMock
 import pytest
 
 from aws_reference_agent.bundle.document import OKFDocument
+from aws_reference_agent.git.repo import Checkout
 from aws_reference_agent.tools.bundle_tools import write_concept_doc
 from aws_reference_agent.tools.context import (
     clear_docs_state,
+    clear_git_state,
     clear_web_state,
     set_context,
     set_docs_state,
     set_expected_concepts,
+    set_git_state,
     set_web_state,
 )
 from aws_reference_agent.verification import VerifyMode
@@ -23,6 +26,7 @@ def _cleanup():
     yield
     clear_web_state()
     clear_docs_state()
+    clear_git_state()
 
 
 def _set_ctx(tmp_path: Path, verify_queries: str = VerifyMode.SCHEMA) -> None:
@@ -34,6 +38,15 @@ def _enter_docs_pass(tmp_path: Path) -> None:
     docs_root = tmp_path / "_docs_root"
     docs_root.mkdir(exist_ok=True)
     set_docs_state(docs_root, max_files=1)
+
+
+def _enter_git_pass() -> None:
+    # A synthetic Checkout is enough: these tests exercise the write guards,
+    # which only need the pass to be active, not a real repository.
+    set_git_state(
+        Checkout(root=Path("/nonexistent"), origin="git@example.com:a/b.git",
+                 sha="0" * 40, cloned=False)
+    )
 
 
 def _good_frontmatter(**overrides):
@@ -243,6 +256,41 @@ def test_web_pass_refuses_to_mint_a_source_table_doc(tmp_path):
         "tables/never_in_the_catalog", _good_frontmatter(), _bq_body(["id"])
     )
     assert "error" in result
+
+
+def test_git_pass_refuses_to_mint_a_source_table_doc(tmp_path):
+    _set_ctx(tmp_path)
+    _enter_git_pass()
+    result = write_concept_doc(
+        "tables/never_in_the_catalog", _good_frontmatter(), _bq_body(["id"])
+    )
+    assert "error" in result
+    assert not (tmp_path / "tables" / "never_in_the_catalog.md").exists()
+
+
+def test_git_pass_rejects_schema_shrinkage(tmp_path):
+    _set_ctx(tmp_path)
+    write_concept_doc(
+        "tables/users", _good_frontmatter(), _bq_body(["id", "name", "email"])
+    )
+    _enter_git_pass()
+    result = write_concept_doc(
+        "tables/users", _good_frontmatter(), _bq_body(["id"])
+    )
+    assert "error" in result
+    assert "`email`" in result["error"]
+
+
+def test_git_pass_may_augment_an_existing_table_doc(tmp_path):
+    _set_ctx(tmp_path)
+    write_concept_doc("tables/users", _good_frontmatter(), _bq_body(["id"]))
+    _enter_git_pass()
+    result = write_concept_doc(
+        "tables/users",
+        _good_frontmatter(),
+        "Prose.\n\n# Schema\n- `id` STRING: the join key used by the ETL\n",
+    )
+    assert "error" not in result
 
 
 def test_augmenting_pass_refuses_a_new_non_reference_doc_of_any_type(tmp_path):

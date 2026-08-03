@@ -21,18 +21,22 @@ from claude_agent_sdk import (
 from aws_reference_agent.agent import (
     DEFAULT_MODEL,
     build_docs_options,
+    build_git_options,
     build_source_options,
     build_web_options,
 )
 from aws_reference_agent.bundle.index import regenerate_indexes
+from aws_reference_agent.git.repo import cleanup, open_checkout
 from aws_reference_agent.sources.base import ConceptRef, Source
 from aws_reference_agent.tools.context import (
     clear_docs_state,
+    clear_git_state,
     clear_web_state,
     get_docs_state,
     set_context,
     set_docs_state,
     set_expected_concepts,
+    set_git_state,
     set_web_state,
 )
 from aws_reference_agent.verification import VerifyMode
@@ -230,6 +234,38 @@ def _build_docs_user_message(
     )
 
 
+def _build_git_user_message(
+    origin: str,
+    sha: str,
+    max_files: int,
+    max_bytes: int,
+    *,
+    max_searches: int,
+    max_hits: int,
+    ref: str | None,
+) -> str:
+    ref_line = f"- Ref requested: {ref}\n" if ref else ""
+    return (
+        f"Ingest code from the git repository below.\n\n"
+        f"Repository origin: {origin}\n"
+        f"Resolved HEAD: {sha}\n"
+        f"{ref_line}"
+        f"\nHard limits enforced by the tools — do not retry rejected calls:\n"
+        f"- Max searches: {max_searches}\n"
+        f"- Max hits returned per search: {max_hits}\n"
+        f"- Max files you may read: {max_files}\n"
+        f"- Max bytes per file (longer files are truncated): {max_bytes}\n\n"
+        f"Follow the code-ingestion workflow. Derive your search terms from the "
+        f"catalog: call `list_concepts()` and `read_concept_raw()` for table and "
+        f"column names, then `search_repo` on those names to find the code that "
+        f"reads and writes these tables. Read the files whose hits look "
+        f"substantive and fold real usage — join keys, filter predicates, metric "
+        f"formulas, enum values, load cadence — into the existing concept docs. "
+        f"Cite the `provenance` string of every file you read; the catalog's "
+        f"schema wins over any code that contradicts it."
+    )
+
+
 class ReferenceRunner:
     def __init__(
         self,
@@ -247,6 +283,13 @@ class ReferenceRunner:
         docs_exclude: list[str] | None = None,
         docs_max_files: int = 200,
         docs_max_bytes: int = 40 * 1024,
+        git_repo: str | None = None,
+        git_ref: str | None = None,
+        git_max_files: int = 100,
+        # Larger than the docs cap (40 KiB): source modules run long.
+        git_max_bytes: int = 60 * 1024,
+        git_max_searches: int = 60,
+        git_max_hits: int = 50,
         verbose: bool = False,
         verify_queries: str = VerifyMode.SCHEMA,
     ):
@@ -276,12 +319,24 @@ class ReferenceRunner:
         self.docs_max_files = int(docs_max_files)
         self.docs_max_bytes = int(docs_max_bytes)
 
+        # Not coerced to Path: the value is legitimately either a local path or
+        # a remote URL, and `open_checkout` is what decides which.
+        self.git_repo = git_repo or None
+        self.git_ref = git_ref or None
+        self.git_max_files = int(git_max_files)
+        self.git_max_bytes = int(git_max_bytes)
+        self.git_max_searches = int(git_max_searches)
+        self.git_max_hits = int(git_max_hits)
+
         self._source_options = build_source_options(model=model)
         self._web_options = (
             build_web_options(model=model) if self.web_seeds else None
         )
         self._docs_options = (
             build_docs_options(model=model) if self.docs_root else None
+        )
+        self._git_options = (
+            build_git_options(model=model) if self.git_repo else None
         )
 
     async def _drain(self, message: str, options, prefix: str) -> None:
@@ -344,6 +399,53 @@ class ReferenceRunner:
     def run_web_pass(self) -> None:
         asyncio.run(self._run_web_pass_async())
 
+    async def _run_git_pass_async(self) -> None:
+        if not self._git_options or not self.git_repo:
+            return
+        # The checkout is opened here rather than inside `set_git_state` so the
+        # resolved SHA is logged before the model runs, and so the clone's
+        # lifetime stays with the code that created it.
+        checkout = await asyncio.to_thread(
+            open_checkout, self.git_repo, ref=self.git_ref
+        )
+        try:
+            log.info(
+                "Running git pass: origin=%s, sha=%s, cloned=%s, root=%s, "
+                "max_searches=%d, max_hits=%d, max_files=%d, max_bytes=%d",
+                checkout.origin,
+                checkout.sha,
+                checkout.cloned,
+                checkout.root,
+                self.git_max_searches,
+                self.git_max_hits,
+                self.git_max_files,
+                self.git_max_bytes,
+            )
+            set_git_state(
+                checkout,
+                max_files=self.git_max_files,
+                max_bytes=self.git_max_bytes,
+                max_searches=self.git_max_searches,
+                max_hits=self.git_max_hits,
+            )
+            message = _build_git_user_message(
+                checkout.origin,
+                checkout.sha,
+                self.git_max_files,
+                self.git_max_bytes,
+                max_searches=self.git_max_searches,
+                max_hits=self.git_max_hits,
+                ref=self.git_ref,
+            )
+            await self._drain(message, self._git_options, "git")
+        finally:
+            clear_git_state()
+            # A temp clone must be removed even when the pass raises.
+            cleanup(checkout)
+
+    def run_git_pass(self) -> None:
+        asyncio.run(self._run_git_pass_async())
+
     async def _run_docs_pass_async(self) -> None:
         if not self._docs_options or not self.docs_root:
             return
@@ -403,6 +505,7 @@ class ReferenceRunner:
             count += 1
 
         await self._run_web_pass_async()
+        await self._run_git_pass_async()
         # Local docs land last: they are the most likely to be stale and the
         # most org-specific, so they augment rather than get augmented.
         await self._run_docs_pass_async()

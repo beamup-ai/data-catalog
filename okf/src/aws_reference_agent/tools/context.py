@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aws_reference_agent.docs.reader import discover
+from aws_reference_agent.git.repo import Checkout
 from aws_reference_agent.sources.base import Source
 from aws_reference_agent.verification import VerifyMode
 
@@ -41,9 +42,29 @@ class DocsState:
     read_count: int = 0
 
 
+@dataclass
+class GitState:
+    """Budgets and read history for one git-ingestion pass.
+
+    There is deliberately no manifest here, unlike `DocsState`: a code repo is
+    searched, not enumerated, so confinement lives in `git/repo.py:read_file`
+    rather than in a pre-vetted path list.
+    """
+
+    checkout: Checkout
+    max_files: int
+    max_bytes: int
+    max_searches: int
+    max_hits: int
+    read: set[str] = field(default_factory=set)
+    read_count: int = 0
+    search_count: int = 0
+
+
 _ctx: ToolContext | None = None
 _web: WebState | None = None
 _docs: DocsState | None = None
+_git: GitState | None = None
 
 
 def set_context(
@@ -160,6 +181,48 @@ def is_docs_pass() -> bool:
     return _docs is not None
 
 
+def set_git_state(
+    checkout: Checkout,
+    *,
+    max_files: int = 100,
+    max_bytes: int = 60 * 1024,
+    max_searches: int = 60,
+    max_hits: int = 50,
+) -> None:
+    """Enter the git pass against an already-opened checkout.
+
+    The checkout is opened by the runner rather than here, so the resolved SHA
+    can be logged before the model runs and the clone's lifetime stays with the
+    caller that created it.
+    """
+    global _git
+    _git = GitState(
+        checkout=checkout,
+        max_files=int(max_files),
+        max_bytes=int(max_bytes),
+        max_searches=int(max_searches),
+        max_hits=int(max_hits),
+    )
+
+
+def get_git_state() -> GitState:
+    if _git is None:
+        raise RuntimeError(
+            "Git state not set. Call set_git_state() before invoking the git agent."
+        )
+    return _git
+
+
+def clear_git_state() -> None:
+    global _git
+    _git = None
+
+
+def is_git_pass() -> bool:
+    """True while the runner is executing the git-repository ingestion pass."""
+    return _git is not None
+
+
 def is_augmenting_pass() -> bool:
     """True during any pass that augments docs the source pass already wrote.
 
@@ -167,7 +230,7 @@ def is_augmenting_pass() -> bool:
     web pass alone, so a new ingestion pass cannot silently shrink a table
     doc's schema or provenance.
     """
-    return is_web_pass() or is_docs_pass()
+    return is_web_pass() or is_docs_pass() or is_git_pass()
 
 
 def get_verify_mode() -> str:

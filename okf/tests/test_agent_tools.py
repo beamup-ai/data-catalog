@@ -152,6 +152,30 @@ def test_build_docs_options():
     ]
 
 
+def test_read_repo_file_wrapper_error_no_git_state(tmp_path):
+    _set_ctx(tmp_path)
+    result = _run(agent_mod._read_repo_file.handler, {"path": "a.py"})
+    assert result["is_error"] is True
+    assert "Git state not set" in result["content"][0]["text"]
+
+
+def test_build_git_options():
+    options = agent_mod.build_git_options()
+    assert options.tools == []
+    assert options.model == agent_mod.DEFAULT_MODEL
+    assert options.system_prompt
+    # validate_query is deliberately absent: repo SQL is cited, not executed.
+    assert options.allowed_tools == [
+        "mcp__okf__list_concepts",
+        "mcp__okf__read_concept_raw",
+        "mcp__okf__read_existing_doc",
+        "mcp__okf__write_concept_doc",
+        "mcp__okf__search_repo",
+        "mcp__okf__list_repo_files",
+        "mcp__okf__read_repo_file",
+    ]
+
+
 def test_build_source_options():
     options = agent_mod.build_source_options(model="opus")
     assert options.tools == []

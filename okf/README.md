@@ -112,7 +112,7 @@ Install uv first if needed: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ## How the reference agent works
 
-The reference agent runs in three passes. The **Glue pass** writes one OKF
+The reference agent runs in four passes. The **Glue pass** writes one OKF
 doc per concept the source advertises (database + tables), using AWS Glue
 Data Catalog metadata, optionally augmented with a small Athena `LIMIT`
 sample of each table's rows. The **web pass** then runs the LLM as its
@@ -125,6 +125,42 @@ existing concept docs, (b) mint a standalone `references/<slug>` doc, or
 (c) skip. A hard `--web-max-pages` cap and a same-domain allowed-hosts
 filter (configurable via `--web-allowed-host`) are enforced inside the
 tool, so the agent cannot overrun.
+
+The **git pass** ingests **code** instead of prose: point `--git-repo` at a
+repository and the agent searches it for the catalog's own table and column
+names, then reads the files that hit. The highest-value description of a table
+is often the query that uses it — real join keys from `JOIN ... ON`, real
+partition columns from a `WHERE` that never varies, real metric formulas from a
+dbt model, real enum domains from a `CASE`. This pass is search-driven rather
+than enumeration-driven: a repo has thousands of files and a path listing does
+not tell you which one queries `trips`, so the agent derives its search terms
+from `list_concepts()` / `read_concept_raw()` and drives `git grep` with them.
+`--git-max-searches`, `--git-max-hits`, `--git-max-files`, and
+`--git-max-bytes` are all enforced inside the tools.
+
+**Private repositories work through your existing git credentials.** The pass
+shells out to the local `git` binary, so SSH agent keys, `credential.helper`,
+`gh auth setup-git`, `GIT_ASKPASS`, and CodeCommit helpers all apply unchanged —
+GitHub, GitLab, Bitbucket, self-hosted, and CodeCommit are identical from the
+tool's point of view. **No token is ever passed to or stored by this tool.**
+`GIT_TERMINAL_PROMPT=0` is set so a missing credential fails fast instead of
+blocking on an interactive password prompt. Access is read-only: a remote is
+shallow-cloned (`--depth 1 --single-branch`) into a temporary directory that is
+removed when the pass ends, even if it raises; an existing local checkout is
+read in place at its current HEAD and never fetched, pulled, or written.
+`--git-ref` selects a branch or tag, and applies to remotes only for that
+reason.
+
+Reads are confined by resolving the path and checking containment in the repo
+root (which rejects both `../` traversal and symlinks pointing out of the tree)
+plus a requirement that the file be tracked by git, so `.git/` internals and
+gitignored files are unreachable. Provenance is commit-based, not
+filesystem-based: each read returns `<origin>@<short-sha>:<path>` and the git
+author date of the file's last commit, because in a fresh clone every mtime is
+the clone time. SQL lifted from the repo is **not** re-executed against the
+source — the repo is the authority on what the repo runs — but any snippet
+placed in a table doc's `# Common query patterns` still has to satisfy the
+schema-consistency guard described under "Query verification" below.
 
 The **docs pass** does the same job from local files instead of the web:
 point `--docs-root` at a directory of markdown or plain-text documents (a
@@ -139,14 +175,14 @@ oversized ones; `--docs-include` / `--docs-exclude` take globs against the
 root-relative path. This pass needs **no IAM and no network** — the IAM
 policy below is unchanged by it.
 
-The docs pass runs last, after the web pass, because local documents are
+The docs pass runs last, after the web and git passes, because local documents are
 the most likely to be stale. It is enrichment-first: documents augment
 existing concept docs (field descriptions folded into `# Schema`, metrics
 into `references/metrics/`, joins into `references/joins/`) rather than
 becoming concepts of their own. Where a document contradicts the catalog,
 the catalog's schema wins and the discrepancy is recorded in prose.
 
-Both augmenting passes are confined to enrichment by `write_concept_doc`,
+All three augmenting passes are confined to enrichment by `write_concept_doc`,
 not just by prompt wording. They may **create** documents only under
 `references/`; any other id must already exist on disk. Without that
 guard an ingested document describing a table the catalog does not have
@@ -158,8 +194,9 @@ entry `in_scope`: out-of-scope concepts stay listed so the agent can
 recognise them (both sides of a documented join, say) but they get no
 document and must not be linked.
 
-Use `--no-web` to skip the web pass, `--no-docs` to skip the docs pass,
-and `--no-sample` to skip Athena row sampling.
+Use `--no-web` to skip the web pass, `--no-git` to skip the git pass,
+`--no-docs` to skip the docs pass, and `--no-sample` to skip Athena row
+sampling.
 
 ## Query verification
 
@@ -321,6 +358,30 @@ In the `-v` log, expect one `list_local_docs` call followed by
 `write_concept_doc` return a schema-guard error and then succeed on retry
 is the healthy trace for an augmentation.
 
+To try the git pass on its own against a local checkout — no network, no
+Athena:
+
+```
+uv run aws-reference-agent enrich \
+    --source glue \
+    --database <glue-database-name> \
+    --concept tables/<table-name> \
+    --no-web \
+    --no-docs \
+    --no-sample \
+    --git-repo /path/to/a/checkout \
+    --out /tmp/okf-git-smoke \
+    -v
+```
+
+Swap in `--git-repo git@github.com:<org>/<private>.git` to exercise the
+credential inheritance against a private remote. In the `-v` log, expect the
+resolved SHA to be logged before the model runs, `search_repo` calls carrying
+catalog-derived table and column names rather than invented terms,
+`read_repo_file` results carrying `provenance` and a git-derived `last_commit`,
+and — for a remote — the temporary clone directory to be gone once the command
+exits.
+
 Then widen to the whole database with all passes on:
 
 ```
@@ -332,6 +393,7 @@ uv run aws-reference-agent enrich \
     --athena-workgroup <workgroup> \
     --web-seed-file <path/to/seeds.txt> \
     --web-max-pages 40 \
+    --git-repo git@github.com:<org>/<warehouse>.git \
     --docs-root ./docs \
     --out ./bundles/<name>
 ```
@@ -346,9 +408,14 @@ Notes on the optional flags:
   sampling then silently yields no rows — omit it unless you know your
   workgroup needs it.
 - `--no-sample` skips Athena entirely; `--no-web` skips the crawl;
-  `--no-docs` skips the docs pass even when `--docs-root` is set.
+  `--no-git` skips the git pass even when `--git-repo` is set; `--no-docs`
+  skips the docs pass even when `--docs-root` is set.
 - `--docs-root` needs no credentials. A nonexistent or non-directory path
   is a hard error rather than a silently skipped pass.
+- `--git-repo` needs no AWS credentials, and no git credentials beyond what
+  your shell already has. It is deliberately **not** prechecked as a
+  directory, since a remote URL is the primary case; an unreachable target
+  fails when the clone is attempted.
 - `--verify-queries {off,schema,execute}` sets how the agent's
   `# Common query patterns` SQL is checked (default `schema`, which costs
   nothing). See [Query verification](#query-verification).

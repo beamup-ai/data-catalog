@@ -112,10 +112,14 @@ Install uv first if needed: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ## How the reference agent works
 
-The reference agent runs in four passes. The **Glue pass** writes one OKF
-doc per concept the source advertises (database + tables), using AWS Glue
-Data Catalog metadata, optionally augmented with a small Athena `LIMIT`
-sample of each table's rows. The **web pass** then runs the LLM as its
+The reference agent runs in five passes. The **source pass** writes one OKF
+doc per concept the source advertises. With `--source glue` that is a Glue
+database plus its tables, using AWS Glue Data Catalog metadata, optionally
+augmented with a small Athena `LIMIT` sample of each table's rows. With
+`--source cube` it is the cubes and views of a Cube.js semantic layer, read
+from its `/cubejs-api/v1/meta` endpoint (measures, dimensions, segments, and
+their business titles and descriptions); this source is metadata-only and does
+no row sampling. The **web pass** then runs the LLM as its
 own crawler: it receives a list of seed URLs (provided via `--web-seed`
 or `--web-seed-file`), fetches the seeds via the `fetch_url` tool, and
 decides which outbound links are worth following based on whether they
@@ -182,7 +186,25 @@ into `references/metrics/`, joins into `references/joins/`) rather than
 becoming concepts of their own. Where a document contradicts the catalog,
 the catalog's schema wins and the discrepancy is recorded in prose.
 
-All three augmenting passes are confined to enrichment by `write_concept_doc`,
+The **cube pass** layers a Cube.js semantic layer over a bundle built from
+another source (typically Glue): point `--cube-url` at the deployment and the
+agent calls `list_cubes()` once, matches cubes and views to concepts already in
+the bundle by name and description, reads the promising ones with
+`read_cube_meta`, and folds their business titles, descriptions, and
+aggregation types into the matching concept docs. It is metadata-only and
+carries the same interface-only caveat as the `--source cube` source: the
+`/meta` endpoint exposes what a member *means*, not the SQL that defines it, the
+joins between cubes, or the physical table a cube maps to. Construction logic
+lives only in the cube-definition repository, so pair `--cube-url` with
+`--git-repo <cube-defs-repo>` when you want the git pass to add measure SQL and
+join provenance. `--cube-max-reads` caps how many cubes it may read. Running the
+cube pass while `--source cube` is active is redundant and is disabled
+automatically; the pass is skipped unless `--cube-url` is set with a different
+source. Auth, when the deployment requires it, is a Cube JWT supplied via the
+`CUBEJS_API_TOKEN` environment variable and sent as the `Authorization` header;
+**no token is passed on the command line or stored by this tool.**
+
+All four augmenting passes are confined to enrichment by `write_concept_doc`,
 not just by prompt wording. They may **create** documents only under
 `references/`; any other id must already exist on disk. Without that
 guard an ingested document describing a table the catalog does not have
@@ -195,8 +217,8 @@ recognise them (both sides of a documented join, say) but they get no
 document and must not be linked.
 
 Use `--no-web` to skip the web pass, `--no-git` to skip the git pass,
-`--no-docs` to skip the docs pass, and `--no-sample` to skip Athena row
-sampling.
+`--no-docs` to skip the docs pass, `--no-cube` to skip the cube pass, and
+`--no-sample` to skip Athena row sampling.
 
 ## Query verification
 
@@ -409,7 +431,11 @@ Notes on the optional flags:
   workgroup needs it.
 - `--no-sample` skips Athena entirely; `--no-web` skips the crawl;
   `--no-git` skips the git pass even when `--git-repo` is set; `--no-docs`
-  skips the docs pass even when `--docs-root` is set.
+  skips the docs pass even when `--docs-root` is set; `--no-cube` skips the
+  cube pass even when `--cube-url` is set.
+- `--cube-url` enables the cube pass over a Glue bundle and is also the target
+  for `--source cube`; set `CUBEJS_API_TOKEN` in the environment if the
+  deployment enforces auth. `--cube-max-reads` caps cubes read per run.
 - `--docs-root` needs no credentials. A nonexistent or non-directory path
   is a hard error rather than a silently skipped pass.
 - `--git-repo` needs no AWS credentials, and no git credentials beyond what

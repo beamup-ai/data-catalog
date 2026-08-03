@@ -20,6 +20,7 @@ from claude_agent_sdk import (
 
 from aws_reference_agent.agent import (
     DEFAULT_MODEL,
+    build_cube_options,
     build_docs_options,
     build_git_options,
     build_source_options,
@@ -28,12 +29,15 @@ from aws_reference_agent.agent import (
 from aws_reference_agent.bundle.index import regenerate_indexes
 from aws_reference_agent.git.repo import cleanup, open_checkout
 from aws_reference_agent.sources.base import ConceptRef, Source
+from aws_reference_agent.sources.cube import CubeSource
 from aws_reference_agent.tools.context import (
+    clear_cube_state,
     clear_docs_state,
     clear_git_state,
     clear_web_state,
     get_docs_state,
     set_context,
+    set_cube_state,
     set_docs_state,
     set_expected_concepts,
     set_git_state,
@@ -266,6 +270,23 @@ def _build_git_user_message(
     )
 
 
+def _build_cube_user_message(base_url: str, max_reads: int) -> str:
+    return (
+        f"Ingest semantic metadata from the Cube.js deployment below.\n\n"
+        f"Base URL: {base_url}\n\n"
+        f"Hard limits enforced by the read_cube_meta tool — do not retry "
+        f"rejected calls:\n"
+        f"- Max cubes you may read: {max_reads}\n\n"
+        f"Follow the cube-ingestion workflow. Call `list_cubes()` once to see "
+        f"all available cubes and views, then read the ones whose names match "
+        f"concepts already in the bundle and fold their business titles, "
+        f"descriptions, and aggregation types into the existing concept docs. "
+        f"Metadata is interface-only: record what members mean, not how they "
+        f"are stored. The catalog's schema wins over anything that contradicts "
+        f"it. Prefer augmenting existing concepts over minting new references."
+    )
+
+
 class ReferenceRunner:
     def __init__(
         self,
@@ -290,6 +311,9 @@ class ReferenceRunner:
         git_max_bytes: int = 60 * 1024,
         git_max_searches: int = 60,
         git_max_hits: int = 50,
+        cube_url: str | None = None,
+        cube_token: str | None = None,
+        cube_max_reads: int = 100,
         verbose: bool = False,
         verify_queries: str = VerifyMode.SCHEMA,
     ):
@@ -328,6 +352,17 @@ class ReferenceRunner:
         self.git_max_searches = int(git_max_searches)
         self.git_max_hits = int(git_max_hits)
 
+        self.cube_url = cube_url or None
+        self.cube_token = cube_token or None
+        self.cube_max_reads = int(cube_max_reads)
+
+        if self.cube_url:
+            self._cube_source: Any = CubeSource(
+                base_url=self.cube_url, token=self.cube_token
+            )
+        else:
+            self._cube_source = None
+
         self._source_options = build_source_options(model=model)
         self._web_options = (
             build_web_options(model=model) if self.web_seeds else None
@@ -337,6 +372,9 @@ class ReferenceRunner:
         )
         self._git_options = (
             build_git_options(model=model) if self.git_repo else None
+        )
+        self._cube_options = (
+            build_cube_options(model=model) if self.cube_url else None
         )
 
     async def _drain(self, message: str, options, prefix: str) -> None:
@@ -446,6 +484,24 @@ class ReferenceRunner:
     def run_git_pass(self) -> None:
         asyncio.run(self._run_git_pass_async())
 
+    async def _run_cube_pass_async(self) -> None:
+        if not self._cube_options or not self.cube_url or not self._cube_source:
+            return
+        log.info(
+            "Running cube pass: base_url=%s, max_reads=%d",
+            self.cube_url,
+            self.cube_max_reads,
+        )
+        set_cube_state(self._cube_source, max_reads=self.cube_max_reads)
+        try:
+            message = _build_cube_user_message(self.cube_url, self.cube_max_reads)
+            await self._drain(message, self._cube_options, "cube")
+        finally:
+            clear_cube_state()
+
+    def run_cube_pass(self) -> None:
+        asyncio.run(self._run_cube_pass_async())
+
     async def _run_docs_pass_async(self) -> None:
         if not self._docs_options or not self.docs_root:
             return
@@ -506,6 +562,7 @@ class ReferenceRunner:
 
         await self._run_web_pass_async()
         await self._run_git_pass_async()
+        await self._run_cube_pass_async()
         # Local docs land last: they are the most likely to be stale and the
         # most org-specific, so they augment rather than get augmented.
         await self._run_docs_pass_async()

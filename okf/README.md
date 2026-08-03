@@ -112,10 +112,14 @@ Install uv first if needed: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ## How the reference agent works
 
-The reference agent runs in four passes. The **Glue pass** writes one OKF
-doc per concept the source advertises (database + tables), using AWS Glue
-Data Catalog metadata, optionally augmented with a small Athena `LIMIT`
-sample of each table's rows. The **web pass** then runs the LLM as its
+The reference agent runs in five passes. The **source pass** writes one OKF
+doc per concept the source advertises. With `--source glue` that is a Glue
+database plus its tables, using AWS Glue Data Catalog metadata, optionally
+augmented with a small Athena `LIMIT` sample of each table's rows. With
+`--source cube` it is the cubes and views of a Cube.js semantic layer, read
+from its `/cubejs-api/v1/meta` endpoint (measures, dimensions, segments, and
+their business titles and descriptions); this source is metadata-only and does
+no row sampling. The **web pass** then runs the LLM as its
 own crawler: it receives a list of seed URLs (provided via `--web-seed`
 or `--web-seed-file`), fetches the seeds via the `fetch_url` tool, and
 decides which outbound links are worth following based on whether they
@@ -182,7 +186,25 @@ into `references/metrics/`, joins into `references/joins/`) rather than
 becoming concepts of their own. Where a document contradicts the catalog,
 the catalog's schema wins and the discrepancy is recorded in prose.
 
-All three augmenting passes are confined to enrichment by `write_concept_doc`,
+The **cube pass** layers a Cube.js semantic layer over a bundle built from
+another source (typically Glue): point `--cube-url` at the deployment and the
+agent calls `list_cubes()` once, matches cubes and views to concepts already in
+the bundle by name and description, reads the promising ones with
+`read_cube_meta`, and folds their business titles, descriptions, and
+aggregation types into the matching concept docs. It is metadata-only and
+carries the same interface-only caveat as the `--source cube` source: the
+`/meta` endpoint exposes what a member *means*, not the SQL that defines it, the
+joins between cubes, or the physical table a cube maps to. Construction logic
+lives only in the cube-definition repository, so pair `--cube-url` with
+`--git-repo <cube-defs-repo>` when you want the git pass to add measure SQL and
+join provenance. `--cube-max-reads` caps how many cubes it may read. Running the
+cube pass while `--source cube` is active is redundant and is disabled
+automatically; the pass is skipped unless `--cube-url` is set with a different
+source. Auth, when the deployment requires it, is a Cube JWT supplied via the
+`CUBEJS_API_TOKEN` environment variable and sent as the `Authorization` header;
+**no token is passed on the command line or stored by this tool.**
+
+All four augmenting passes are confined to enrichment by `write_concept_doc`,
 not just by prompt wording. They may **create** documents only under
 `references/`; any other id must already exist on disk. Without that
 guard an ingested document describing a table the catalog does not have
@@ -195,8 +217,8 @@ recognise them (both sides of a documented join, say) but they get no
 document and must not be linked.
 
 Use `--no-web` to skip the web pass, `--no-git` to skip the git pass,
-`--no-docs` to skip the docs pass, and `--no-sample` to skip Athena row
-sampling.
+`--no-docs` to skip the docs pass, `--no-cube` to skip the cube pass, and
+`--no-sample` to skip Athena row sampling.
 
 ## Query verification
 
@@ -382,6 +404,82 @@ catalog-derived table and column names rather than invented terms,
 and — for a remote — the temporary clone directory to be gone once the command
 exits.
 
+### Cube.js semantic layer
+
+The Cube.js semantic layer works two ways: as its own source (`--source cube`,
+cataloging the cubes and views) and as an enrichment pass over another source's
+bundle (`--cube-url`, folding business semantics into e.g. Glue table docs).
+
+**Auth.** If the deployment enforces auth, it expects an HS256 JWT in the
+`Authorization` header carrying an `org-id` claim (this is the standard Cube
+`check_auth` contract, signed with the deployment's API secret). Supply it via
+the `CUBEJS_API_TOKEN` environment variable — never a flag, so it stays out of
+shell history. Mint one with the shared secret:
+
+```
+export CUBEJS_API_TOKEN=$(python3 -c '
+import jwt, time, os
+print(jwt.encode({"iat": int(time.time()), "org-id": os.environ["CUBE_ORG_ID"]},
+                 os.environ["CUBEJS_API_SECRET"], algorithm="HS256"))
+')
+```
+
+or paste a token issued by the Cube Playground's Security Context. Confirm it
+reaches the API before spending tokens — this hits `/meta` only, no LLM:
+
+```
+curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+    -H "Authorization: $CUBEJS_API_TOKEN" \
+    <cube-url>/cubejs-api/v1/meta
+```
+
+A cold deployment recompiles its schema on the first `/meta` call and can take
+~40s; the client waits up to `--cube-timeout` seconds (default 60). If auth is
+disabled, omit the token entirely.
+
+**As a source** — catalog the semantic layer itself. Metadata-only, no AWS, no
+Athena. Scope to one cube first:
+
+```
+uv run aws-reference-agent enrich \
+    --source cube \
+    --cube-url http://semantic-layer.prod.beamup.ai \
+    --concept cubes/<cube-name> \
+    --no-web --no-git --no-docs \
+    --out /tmp/okf-cube-smoke \
+    -v
+```
+
+Drop `--concept` to catalog every cube and view. Cube ids are `cubes/<name>`
+and `views/<name>`; each doc lists the cube's measures, dimensions, and
+segments, and its `# Common query patterns` show how to query the cube through
+Cube's API — REST `/load` query objects and, where useful, a Cube SQL API
+example — rather than raw warehouse SQL, since a cube is not a physical table. Note that `/meta` carries the semantic *interface* only — member
+titles, types, and descriptions — not the SQL, joins, or physical-table
+mapping; that construction logic lives in the cube-definition repository and is
+reached through the git pass below.
+
+**As an enrichment pass over Glue** — add `--cube-url` to a `--source glue` run
+and the cube pass matches cubes to your table docs by name and folds their
+business titles and descriptions in. Pair it with `--git-repo <cube-defs-repo>`
+so the git pass supplies the cube-to-table binding and measure SQL that `/meta`
+omits:
+
+```
+uv run aws-reference-agent enrich \
+    --source glue \
+    --database <glue-database-name> \
+    --concept tables/<table-name> \
+    --cube-url http://semantic-layer.prod.beamup.ai \
+    --git-repo git@github.com:<org>/<cube-defs>.git \
+    --no-web --no-docs --no-sample \
+    --out /tmp/okf-glue-cube-smoke \
+    -v
+```
+
+The cube pass is skipped automatically when `--source cube` is active (it would
+be redundant), and `--no-cube` skips it even when `--cube-url` is set.
+
 Then widen to the whole database with all passes on:
 
 ```
@@ -394,6 +492,7 @@ uv run aws-reference-agent enrich \
     --web-seed-file <path/to/seeds.txt> \
     --web-max-pages 40 \
     --git-repo git@github.com:<org>/<warehouse>.git \
+    --cube-url http://semantic-layer.prod.beamup.ai \
     --docs-root ./docs \
     --out ./bundles/<name>
 ```
@@ -409,7 +508,13 @@ Notes on the optional flags:
   workgroup needs it.
 - `--no-sample` skips Athena entirely; `--no-web` skips the crawl;
   `--no-git` skips the git pass even when `--git-repo` is set; `--no-docs`
-  skips the docs pass even when `--docs-root` is set.
+  skips the docs pass even when `--docs-root` is set; `--no-cube` skips the
+  cube pass even when `--cube-url` is set.
+- `--cube-url` enables the cube pass over a Glue bundle and is also the target
+  for `--source cube`; set `CUBEJS_API_TOKEN` in the environment if the
+  deployment enforces auth. `--cube-max-reads` caps cubes read per run, and
+  `--cube-timeout` (default 60s) bounds the `/meta` request — raise it only if
+  a cold deployment's schema recompile runs long.
 - `--docs-root` needs no credentials. A nonexistent or non-directory path
   is a hard error rather than a silently skipped pass.
 - `--git-repo` needs no AWS credentials, and no git credentials beyond what

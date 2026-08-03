@@ -11,7 +11,7 @@ from aws_reference_agent.bundle.paths import parse_concept_id
 from aws_reference_agent.runner import ReferenceRunner
 from aws_reference_agent.verification import VERIFY_MODES, VerifyMode
 
-_SOURCES = ("glue",)
+_SOURCES = ("glue", "cube")
 
 
 def _build_source(name: str, args: argparse.Namespace):
@@ -27,6 +27,17 @@ def _build_source(name: str, args: argparse.Namespace):
             athena_workgroup=args.athena_workgroup,
             athena_output_location=args.athena_output_location,
             sampling_enabled=not args.no_sample,
+        )
+    if name == "cube":
+        import os
+
+        from aws_reference_agent.sources.cube import CubeSource
+
+        if not args.cube_url:
+            raise SystemExit("--cube-url is required for --source cube")
+        token = os.environ.get("CUBEJS_API_TOKEN")
+        return CubeSource(
+            base_url=args.cube_url, token=token, timeout=args.cube_timeout
         )
     raise SystemExit(f"Unknown source: {name}")
 
@@ -99,6 +110,15 @@ def _parser() -> argparse.ArgumentParser:
         "--no-sample",
         action="store_true",
         help="Skip Athena row sampling.",
+    )
+    enrich.add_argument(
+        "--cube-url",
+        default=None,
+        help=(
+            "Base URL of the Cube.js deployment, e.g. "
+            "http://semantic-layer.prod.beamup.ai. "
+            "Auth token via CUBEJS_API_TOKEN env var."
+        ),
     )
     enrich.add_argument(
         "--out", required=True, type=Path, help="Bundle root directory."
@@ -254,6 +274,25 @@ def _parser() -> argparse.ArgumentParser:
         help="Skip the git pass entirely, even if --git-repo is given.",
     )
     enrich.add_argument(
+        "--cube-max-reads",
+        type=int,
+        default=100,
+        help="Hard cap on cubes the cube agent may read in one run (default 100).",
+    )
+    enrich.add_argument(
+        "--cube-timeout",
+        type=float,
+        default=60.0,
+        help="Per-request timeout in seconds for the Cube /meta call "
+        "(default 60). A cold semantic layer can take ~40s to recompile "
+        "its schema on the first request.",
+    )
+    enrich.add_argument(
+        "--no-cube",
+        action="store_true",
+        help="Skip the Cube semantic layer pass entirely.",
+    )
+    enrich.add_argument(
         "--verify-queries",
         choices=VERIFY_MODES,
         default="schema",
@@ -333,6 +372,16 @@ def main(argv: list[str] | None = None) -> int:
         # No is_dir() precheck for --git-repo: the value is legitimately either a
         # path or a URL, so validation belongs in open_checkout.
         git_repo = None if args.no_git else args.git_repo
+        # Cube pass: enabled when --cube-url is set AND --source is not cube AND
+        # --no-cube is not given. When --source cube is used the source pass
+        # already consumed the Cube API; running a separate enrichment pass
+        # against the same deployment would duplicate work.
+        import os as _os
+
+        cube_url_for_pass: str | None = None
+        if not args.no_cube and args.source != "cube" and args.cube_url:
+            cube_url_for_pass = args.cube_url
+        cube_token = _os.environ.get("CUBEJS_API_TOKEN")
         runner = ReferenceRunner(
             source=source,
             bundle_root=args.out,
@@ -354,6 +403,10 @@ def main(argv: list[str] | None = None) -> int:
             git_max_bytes=args.git_max_bytes,
             git_max_searches=args.git_max_searches,
             git_max_hits=args.git_max_hits,
+            cube_url=cube_url_for_pass,
+            cube_token=cube_token,
+            cube_max_reads=args.cube_max_reads,
+            cube_timeout=args.cube_timeout,
             verbose=args.verbose,
             verify_queries=args.verify_queries,
         )
@@ -372,9 +425,14 @@ def main(argv: list[str] | None = None) -> int:
             if git_repo
             else "; git pass skipped"
         )
+        cube_note = (
+            f"; cube pass read from {cube_url_for_pass}"
+            if cube_url_for_pass
+            else "; cube pass skipped"
+        )
         print(
             f"Enriched {n} concept(s) into {args.out}"
-            f"{web_note}{git_note}{docs_note}",
+            f"{web_note}{git_note}{cube_note}{docs_note}",
             file=sys.stderr,
         )
         return 0

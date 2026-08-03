@@ -3,11 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aws_reference_agent.docs.reader import discover
 from aws_reference_agent.git.repo import Checkout
 from aws_reference_agent.sources.base import Source
 from aws_reference_agent.verification import VerifyMode
+
+if TYPE_CHECKING:
+    from aws_reference_agent.sources.cube import CubeSource
 
 
 @dataclass
@@ -61,10 +65,19 @@ class GitState:
     search_count: int = 0
 
 
+@dataclass
+class CubeState:
+    source: "CubeSource"
+    max_reads: int
+    read: set[str] = field(default_factory=set)
+    read_count: int = 0
+
+
 _ctx: ToolContext | None = None
 _web: WebState | None = None
 _docs: DocsState | None = None
 _git: GitState | None = None
+_cube: CubeState | None = None
 
 
 def set_context(
@@ -223,6 +236,33 @@ def is_git_pass() -> bool:
     return _git is not None
 
 
+def set_cube_state(
+    source: "CubeSource",
+    *,
+    max_reads: int = 100,
+) -> None:
+    global _cube
+    _cube = CubeState(source=source, max_reads=int(max_reads))
+
+
+def get_cube_state() -> CubeState:
+    if _cube is None:
+        raise RuntimeError(
+            "Cube state not set. Call set_cube_state() before invoking the cube agent."
+        )
+    return _cube
+
+
+def clear_cube_state() -> None:
+    global _cube
+    _cube = None
+
+
+def is_cube_pass() -> bool:
+    """True while the runner is executing the Cube semantic layer ingestion pass."""
+    return _cube is not None
+
+
 def is_augmenting_pass() -> bool:
     """True during any pass that augments docs the source pass already wrote.
 
@@ -230,7 +270,7 @@ def is_augmenting_pass() -> bool:
     web pass alone, so a new ingestion pass cannot silently shrink a table
     doc's schema or provenance.
     """
-    return is_web_pass() or is_docs_pass() or is_git_pass()
+    return is_web_pass() or is_docs_pass() or is_git_pass() or is_cube_pass()
 
 
 def get_verify_mode() -> str:

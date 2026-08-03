@@ -8,6 +8,7 @@ from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
 
 from aws_reference_agent.tools.bundle_tools import read_existing_doc, write_concept_doc
 from aws_reference_agent.tools.doc_tools import list_local_docs, read_local_doc
+from aws_reference_agent.tools.cube_tools import list_cubes, read_cube_meta
 from aws_reference_agent.tools.git_tools import (
     list_repo_files,
     read_repo_file,
@@ -78,6 +79,9 @@ _fetch_url = _wrap("fetch_url", {"url": str}, fetch_url)
 _list_local_docs = _wrap("list_local_docs", {}, list_local_docs)
 _read_local_doc = _wrap("read_local_doc", {"path": str}, read_local_doc)
 _validate_query = _wrap("validate_query", {"sql": str}, validate_query)
+_list_cubes = _wrap("list_cubes", {}, list_cubes)
+_read_cube_meta = _wrap("read_cube_meta", {"name": str}, read_cube_meta)
+
 _search_repo = _wrap(
     "search_repo",
     {"pattern": str, "path_glob": str, "regex": bool},
@@ -87,7 +91,10 @@ _list_repo_files = _wrap("list_repo_files", {"path_glob": str}, list_repo_files)
 _read_repo_file = _wrap("read_repo_file", {"path": str}, read_repo_file)
 
 
-def build_source_options(model: str = DEFAULT_MODEL) -> ClaudeAgentOptions:
+def build_source_options(
+    model: str = DEFAULT_MODEL,
+    instruction_file: str = "reference_instruction.md",
+) -> ClaudeAgentOptions:
     tools = [
         _list_concepts,
         _read_concept_raw,
@@ -109,7 +116,7 @@ def build_source_options(model: str = DEFAULT_MODEL) -> ClaudeAgentOptions:
         )
     ]
     return ClaudeAgentOptions(
-        system_prompt=_load_prompt("reference_instruction.md"),
+        system_prompt=_load_prompt(instruction_file),
         mcp_servers={_SERVER_NAME: server},
         allowed_tools=allowed,
         tools=[],
@@ -172,6 +179,36 @@ def build_git_options(model: str = DEFAULT_MODEL) -> ClaudeAgentOptions:
     ]
     return ClaudeAgentOptions(
         system_prompt=_load_prompt("git_ingestion_instruction.md"),
+        mcp_servers={_SERVER_NAME: server},
+        allowed_tools=allowed,
+        tools=[],
+        model=model,
+    )
+
+
+def build_cube_options(model: str = DEFAULT_MODEL) -> ClaudeAgentOptions:
+    tools = [
+        _list_concepts,
+        _read_concept_raw,
+        _read_existing_doc,
+        _write_concept_doc,
+        _list_cubes,
+        _read_cube_meta,
+    ]
+    server = create_sdk_mcp_server(name=_SERVER_NAME, version="1.0.0", tools=tools)
+    allowed = [
+        _qualify(n)
+        for n in (
+            "list_concepts",
+            "read_concept_raw",
+            "read_existing_doc",
+            "write_concept_doc",
+            "list_cubes",
+            "read_cube_meta",
+        )
+    ]
+    return ClaudeAgentOptions(
+        system_prompt=_load_prompt("cube_ingestion_instruction.md"),
         mcp_servers={_SERVER_NAME: server},
         allowed_tools=allowed,
         tools=[],
